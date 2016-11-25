@@ -130,7 +130,7 @@ function Setup:parseOptions(arg)
   cmd:option('-reportWeights', 'false', 'Report weight and weight gradient statistics')
   cmd:option('-noValidation', 'false', 'Disable asynchronous agent validation thread') -- TODO: Make behaviour consistent across Master/AsyncMaster
   cmd:option('-valFreq', 250000, 'Interval of steps between validating agent') -- valFreq steps is used as an epoch, hence #epochs = steps/valFreq
-  cmd:option('-valSteps', 125000, 'Number of steps to use for validation')
+  cmd:option('-valSteps', 100, 'Number of episodes to use for validation')
   cmd:option('-valSize', 500, 'Number of transitions to use for calculating validation statistics')
   -- Async options
   cmd:option('-async', '', 'Async agent: <none>|Sarsa|OneStepQ|NStepQ|A3C') -- TODO: Change names
