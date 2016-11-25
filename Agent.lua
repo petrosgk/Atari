@@ -101,6 +101,9 @@ function Agent:_init(opt)
 
   -- Get singleton instance for step
   self.globals = Singleton.getInstance()
+  
+  -- Flag for triggering learning at the end of an episode
+  self.learningScheduled = false
 end
 
 -- Sets training mode
@@ -238,13 +241,19 @@ function Agent:observe(reward, rawObservation, terminal)
     if self.globals.step <= self.valSize + 1 then
       self.valMemory:store(reward, observation, terminal, aIndex)
     end
+    
+    -- Schedule learning after current episode ends
+    if self.globals.step % self.memSampleFreq == 0 and self.globals.step >= self.learnStart then
+	  self.learningScheduled = true
+    end
 
     -- Sample uniformly or with prioritised sampling
-    if self.globals.step % self.memSampleFreq == 0 and self.globals.step >= self.learnStart then
+    if self.learningScheduled and terminal then
       for n = 1, self.memNSamples do
         -- Optimise (learn) from experience tuples
         self:optimise(self.memory:sample())
       end
+      self.learningScheduled = false
     end
 
     -- Update target network every τ steps
