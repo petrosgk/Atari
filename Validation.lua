@@ -117,32 +117,23 @@ function Validation:evaluate()
   self.env:evaluate()
   self.agent:evaluate()
 
-  local reward, state, terminal = 0, self.env:start(), false
-
-  -- Report episode score
-  local episodeScore = reward
-
-  -- Play one game (episode)
-  local step = 1
-  while not terminal do
-    -- Observe and choose next action (index)
-    action = self.agent:observe(reward, state, terminal)
-    -- Act on environment
-    reward, state, terminal = self.env:step(action)
-    episodeScore = episodeScore + reward
-
-    -- Record (if available)
-    if self.hasDisplay then
-      self.display:display(self.agent, self.env:getDisplay(), step)
+  -- Play a number of episodes
+  local episode = 1
+  
+  for valStep = 1, self.opt.valSteps do
+    local reward, state, terminal = 0, self.env:start(), false
+    -- Report episode score
+    local episodeScore = reward
+    while not terminal do
+      -- Observe and choose next action (index)
+      action = self.agent:observe(reward, state, terminal)
+      -- Act on environment
+      reward, state, terminal = self.env:step(action)
+      episodeScore = episodeScore + reward
     end
-    -- Increment evaluation step counter
-    step = step + 1
-  end
-  log.info('Final Score: ' .. episodeScore)
-
-  -- Record (if available)
-  if self.hasDisplay then
-    self.display:createVideo()
+    log.info('Episode ' .. episode .. ' final Score: ' .. episodeScore)
+    -- Increment episode counter
+    episode = episode + 1
   end
 end
 
