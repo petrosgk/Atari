@@ -80,6 +80,10 @@ function Agent:_init(opt)
   -- Q-learning variables (per head)
   self.QPrimes = opt.Tensor(opt.batchSize, self.heads, self.m)
   self.tdErr = opt.Tensor(opt.batchSize, self.heads)
+  if opt.kSteps > 0 then
+    self.tdErrLower = opt.Tensor(opt.batchSize, self.heads)
+    self.tdErrUpper = opt.Tensor(opt.batchSize, self.heads)
+  end
   self.VPrime = opt.Tensor(opt.batchSize, self.heads, 1)
 
   -- Validation variables
@@ -337,7 +341,7 @@ function Agent:learn(x, indices, ISWeights, isValidation)
 
   -- Retrieve experience tuples
   local memory = isValidation and self.valMemory or self.memory
-  local states, actions, rewards, disountedRewards, transitions, terminals = memory:retrieve(indices) -- Terminal status is for transition (can't act in terminal state)
+  local states, actions, rewards, discountedRewards, transitions, terminals = memory:retrieve(indices) -- Terminal status is for transition (can't act in terminal state)
   local N = actions:size(1)
 
   if self.recurrent then
@@ -412,19 +416,64 @@ function Agent:learn(x, indices, ISWeights, isValidation)
     self.tdErr = torch.max(torch.cat(tdErrAL, self.tdErr:csub((self.VPrime:csub(QPrime):mul(self.PALpha))), 3), 3):view(N, self.heads, 1)
   end
 
+  if self.kSteps > 0 then
+    local Lmax = self.Tensor(N, self.heads)
+    local Umin = self.Tensor(N, self.heads)
+    for n = 1, N do
+      local L = self.Tensor(self.kSteps, self.heads)
+      local U = self.Tensor(self.kSteps, self.heads)
+      -- Indices of k future and past time steps
+      local kIndice = torch.LongTensor(self.kSteps)
+      for kStep = 1, self.kSteps do
+        -- Starting from current transition, get the k future transition
+        kIndice[1] = indices[n] + kStep
+        -- TODO: Need to check if successive transition is valid
+        local state, action, reward, discountedReward, transition, terminal = self.memory:retrieve(kIndice)
+        -- Forward future k-transition to get L_k across heads
+        L[kStep] = self.targetNet:forward(transition)
+        --  Starting from current transition, get the k past transition
+        kIndice[1] = indices[n] - kStep
+        state, action, reward, discountedReward, transition, terminal = self.memory:retrieve(kIndice)
+        -- Forward past k-transition to get U_k across heads
+        U[kStep] = self.targetNet:forward(transition)
+      end
+      -- Get max lower bound across heads
+      Lmax[n] = torch.max(L, 1)
+      -- Get min upper bound across heads
+      Umin[n] = torch.min(U, 1)
+    end
+    -- Calculate TD-error: Lmax - Q(s, a)
+    self.tdErrLower = Lmax - QTaken
+    -- Calculate TD-error: Q(s, a) - Umin
+    self.tdErrUpper = QTaken - Umin
+  end
+
   -- Calculate loss
   local loss
   if self.tdClip > 0 then
     -- Squared loss is used within clipping range, absolute loss is used outside (approximates Huber loss)
     local sqLoss = torch.cmin(torch.abs(self.tdErr), self.tdClip)
     local absLoss = torch.abs(self.tdErr) - sqLoss
-    loss = torch.mean(sqLoss:pow(2):mul(0.5):add(absLoss:mul(self.tdClip))) -- Average over heads
-
+    if self.kSteps > 0 then
+      local a = sqLoss:pow(2):mul(0.5):add(absLoss:mul(self.tdClip))
+      local b = self.tdErrLower:clone():pow(2):cmax(0):mul(self.lamda):mul(0.5)
+      local c = self.tdErrUpper:clone():pow(2):cmax(0):mul(self.lambda):mul(0.5)
+      loss = torch.mean(a:add(b):add(c)) -- Average over heads
+    else
+      loss = torch.mean(sqLoss:pow(2):mul(0.5):add(absLoss:mul(self.tdClip))) -- Average over heads
+    end
     -- Clip TD-errors δ
     self.tdErr:clamp(-self.tdClip, self.tdClip)
   else
     -- Squared loss
-    loss = torch.mean(self.tdErr:clone():pow(2):mul(0.5)) -- Average over heads
+    if self.kSteps > 0 then
+      local a = self.tdErr:clone():pow(2)
+      local b = self.tdErrLower:clone():pow(2):cmax(0):mul(self.lamda)
+      local c = self.tdErrUpper:clone():pow(2):cmax(0):mul(self.lambda)
+      loss = torch.mean(a:add(b):add(c):mul(0.5)) -- Average over heads
+    else
+      loss = torch.mean(self.tdErr:clone():pow(2):mul(0.5)) -- Average over heads
+    end
   end
 
   -- Exit if being used for validation metrics
