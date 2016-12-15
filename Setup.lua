@@ -115,6 +115,8 @@ function Setup:parseOptions(arg)
   cmd:option('-rewardClip', 1, 'Clips reward magnitude at rewardClip (0 to disable)')
   cmd:option('-tdClip', 1, 'Clips TD-error δ magnitude at tdClip (0 to disable)')
   cmd:option('-doubleQ', 'true', 'Use Double Q-learning')
+  cmd:option('-kSteps', 4, 'Steps to consider when calculating lower and upper bounds for optimality constraint')
+  cmd:option('-lambda', 4, 'Penalty coefficient for optimality bounding constraint violation')
   -- Note from Georg Ostrovski: The advantage operators and Double DQN are not entirely orthogonal as the increased action gap seems to reduce the statistical bias that leads to value over-estimation in a similar way that Double DQN does
   cmd:option('-PALpha', 0.9, 'Persistent advantage learning parameter α (0 to disable)')
   -- Training options
