@@ -25,6 +25,7 @@ function Experience:_init(capacity, opt, isValidation)
     states = opt.Tensor(bufferStateSize),
     actions = torch.ByteTensor(opt.batchSize),
     rewards = opt.Tensor(opt.batchSize),
+    discountedRewards = opt.Tensor(opt.batchSize),
     transitions = opt.Tensor(bufferStateSize),
     terminals = torch.ByteTensor(opt.batchSize),
     priorities = opt.Tensor(opt.batchSize)
@@ -43,6 +44,7 @@ function Experience:_init(capacity, opt, isValidation)
   end
   self.actions = torch.ByteTensor(capacity) -- Discrete action indices
   self.rewards = torch.FloatTensor(capacity) -- Stored at time t (not t + 1)
+  self.discountedRewards = torch.FloatTensor(capacity)
   -- Terminal conditions stored at time t+1, encoded by 0 = false, 1 = true
   self.terminals = torch.ByteTensor(capacity):fill(1) -- Filling with 1 prevents going back in history at beginning
   -- Validation flags (used if state is stored without transition)
@@ -124,8 +126,12 @@ function Experience:circIndex(x)
 end
 
 -- Stores experience tuple parts (including pre-emptive action)
-function Experience:store(reward, state, terminal, action)
+function Experience:store(reward, discountedReward, state, terminal, action)
   self.rewards[self.index] = reward
+  self.discountedRewards[self.index] = discountedReward
+
+  -- Index of the last tuple inserted in replay memory
+  self.lastIndex = self.index
 
   -- Increment index and size
   self.index = self.index + 1
@@ -155,6 +161,8 @@ function Experience:store(reward, state, terminal, action)
       self.priorityQueue:insert(maxPriority, self.index)
     end
   end
+  -- Return last tuple index
+  return self.lastIndex
 end
 
 -- Sets current state as invalid (utilised when switching to evaluation mode)
@@ -176,6 +184,8 @@ function Experience:retrieve(indices)
     self.transTuples.actions[n] = self.actions[memIndex]
     -- Retrieve rewards
     self.transTuples.rewards[n] = self.rewards[memIndex]
+    -- Retrieve dicounted rewards
+    self.transTuples.discountedRewards[n] = self.discountedRewards[memIndex]
     -- Retrieve terminal status (of transition)
     self.transTuples.terminals[n] = self.terminals[self:circIndex(memIndex + 1)]
 
@@ -209,7 +219,7 @@ function Experience:retrieve(indices)
     end
   end
 
-  return self.transTuples.states[{{1, N}}], self.transTuples.actions[{{1, N}}], self.transTuples.rewards[{{1, N}}], self.transTuples.transitions[{{1, N}}], self.transTuples.terminals[{{1, N}}]
+  return self.transTuples.states[{{1, N}}], self.transTuples.actions[{{1, N}}], self.transTuples.rewards[{{1, N}}], self.transTuples.discountedRewards[{{1, N}}], self.transTuples.transitions[{{1, N}}], self.transTuples.terminals[{{1, N}}]
 end
 
 -- Determines if an index points to a valid transition state
@@ -304,6 +314,12 @@ end
 -- Rebalance prioritised experience replay heap
 function Experience:rebalance()
   self.priorityQueue:rebalance()
+end
+
+-- Update a tuple's discounted reward given its place in memory
+function Experience:updateTuple(indice, discountedReward)
+  local memIndex = indice
+  self.discountedRewards[memIndex] = discountedReward
 end
 
 return Experience
