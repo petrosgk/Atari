@@ -52,6 +52,8 @@ function Agent:_init(opt)
   self.epsilonEnd = opt.epsilonEnd
   self.epsilonGrad = (opt.epsilonEnd - opt.epsilonStart)/opt.epsilonSteps -- Greediness ε decay factor
   self.PALpha = opt.PALpha
+  self.kSteps = opt.kSteps
+  self.lambda = opt.lambda
 
   -- State buffer
   self.stateBuffer = CircularQueue(opt.recurrent and 1 or opt.histLen, opt.Tensor, opt.stateSpec[2])
@@ -101,6 +103,15 @@ function Agent:_init(opt)
 
   -- Get singleton instance for step
   self.globals = Singleton.getInstance()
+
+  if opt.kSteps > 0 then
+    -- Reward buffer for a single episode
+    self.rewardBuffer = {}
+    -- Indices in replay memory of stored tuples for a single episode
+    self.episodeIndices = {}
+    -- Time steps count of a single episode
+    self.episodeSteps = 0
+  end
 end
 
 -- Sets training mode
@@ -117,6 +128,11 @@ function Agent:training()
   if self.recurrent then
     self.policyNet:forget()
     self.targetNet:forget()
+  end
+  if self.kSteps > 0 then
+    self.rewardBuffer = {}
+    self.episodeIndices = {}
+    self.episodeSteps = 0
   end
 end
 
@@ -135,6 +151,11 @@ function Agent:evaluate()
   -- Forget last sequence
   if self.recurrent then
     self.policyNet:forget()
+  end
+  if self.kSteps > 0 then
+    self.rewardBuffer = {}
+    self.episodeIndices = {}
+    self.episodeSteps = 0
   end
 end
   
@@ -231,12 +252,19 @@ function Agent:observe(reward, rawObservation, terminal)
 
   -- If training
   if self.isTraining then
-    -- Store experience tuple parts (including pre-emptive action)
-    self.memory:store(reward, observation, terminal, aIndex) -- TODO: Sample independent Bernoulli(p) bootstrap masks for all heads; p = 1 means no masks needed
+    local discountedReward = 0
+
+    -- Store experience tuple parts (including pre-emptive action) and return index of tuple in memory
+    local memIndex = self.memory:store(reward, discountedReward, observation, terminal, aIndex) -- TODO: Sample independent Bernoulli(p) bootstrap masks for all heads; p = 1 means no masks needed
+
+    if self.kSteps > 0 then
+      self.episodeSteps = self.episodeSteps + 1
+      self.episodeIndices[self.episodeSteps] = memIndex
+    end
 
     -- Collect validation transitions at the start
     if self.globals.step <= self.valSize + 1 then
-      self.valMemory:store(reward, observation, terminal, aIndex)
+      self.valMemory:store(reward, discountedReward, observation, terminal, aIndex)
     end
 
     -- Sample uniformly or with prioritised sampling
@@ -257,6 +285,26 @@ function Agent:observe(reward, rawObservation, terminal)
     if self.globals.step % self.memSize == 0 and self.memPriority then
       self.memory:rebalance()
     end
+
+    if self.kSteps > 0 then
+      -- Store reward in reward buffer
+      self.rewardBuffer[self.episodeSteps] = reward
+      -- If end of episode reached, update discounted rewards for each timestep from beginning to end of episode
+      if terminal then
+        -- From beginning until the end T of the episode
+        for episodeStep = 1, self.episodeSteps do
+          local discountedReward = 0
+          -- From step j to T
+          for tau = episodeStep, self.episodeSteps do
+            -- R_j = R_j + [gamma^(tau - j)*r_tau]
+            discountedReward = discountedReward + self.rewardBuffer[tau] * self.gamma ^ (tau - episodeStep)
+          end
+          -- Update discounted reward R_j in tuple [s_j, r_j, R_j, a_j, s_(j+1)]
+          local indice = self.episodeIndices[episodeStep]
+          self.memory:updateTuple(indice, discountedReward)
+        end
+      end
+    end
   end
 
   if terminal then
@@ -266,6 +314,11 @@ function Agent:observe(reward, rawObservation, terminal)
     elseif self.recurrent then
       -- Forget last sequence
       self.policyNet:forget()
+    end
+    if self.kSteps > 0 then
+      self.rewardBuffer = {}
+      self.episodeIndices = {}
+      self.episodeSteps = 0
     end
   end
 
@@ -284,7 +337,7 @@ function Agent:learn(x, indices, ISWeights, isValidation)
 
   -- Retrieve experience tuples
   local memory = isValidation and self.valMemory or self.memory
-  local states, actions, rewards, transitions, terminals = memory:retrieve(indices) -- Terminal status is for transition (can't act in terminal state)
+  local states, actions, rewards, disountedRewards, transitions, terminals = memory:retrieve(indices) -- Terminal status is for transition (can't act in terminal state)
   local N = actions:size(1)
 
   if self.recurrent then
