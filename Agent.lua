@@ -422,24 +422,22 @@ function Agent:learn(x, indices, ISWeights, isValidation)
     for n = 1, N do
       local L = self.Tensor(self.kSteps, self.heads)
       local U = self.Tensor(self.kSteps, self.heads)
-      -- Indices of k future and past time steps
-      local kIndice = torch.LongTensor(self.kSteps)
+      local kIndices = torch.LongTensor(2 * self.kSteps) -- indices of k future and k past transitions
+      -- Starting from current transition, get k future and k past transitions
       for kStep = 1, self.kSteps do
-        -- Starting from current transition, get the k future transition
-        kIndice[1] = indices[n] + kStep
-        -- TODO: Need to check if successive transition is valid
-        local state, action, reward, discountedReward, transition, terminal = self.memory:retrieve(kIndice)
-        -- Forward future k-transition to get L_k across heads
-        L[kStep] = self.targetNet:forward(transition)
-        --  Starting from current transition, get the k past transition
-        kIndice[1] = indices[n] - kStep
-        state, action, reward, discountedReward, transition, terminal = self.memory:retrieve(kIndice)
-        -- Forward past k-transition to get U_k across heads
-        U[kStep] = self.targetNet:forward(transition)
+        -- Get the k future transition (used for calculating L_k)
+        kIndices[kStep] = indices[n] + kStep
+        -- Get the k past transition (used for calculating U_k)
+        kIndices[kStep + self.kSteps] = indices[n] - kStep
       end
-      -- Get max lower bound across heads
+      local kTransitions = self.memory:retrieve(kIndices)
+      -- Forward all k transitions to get L_k and U_k for all heads
+      local allK = self.targetNet:forward(kTransitions)
+      L = allK[{{1, self.kSteps}, {}}]
+      U = allK[{{self.kSteps + 1, 2 * self.kSteps}, {}}]
+      -- Get max lower bound for all heads
       Lmax[n] = torch.max(L, 1)
-      -- Get min upper bound across heads
+      -- Get min upper bound for all heads
       Umin[n] = torch.min(U, 1)
     end
     -- Calculate TD-error: Lmax - Q(s, a)
