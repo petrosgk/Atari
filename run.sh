@@ -6,7 +6,7 @@ cd `dirname -- "$0"`
 # Specify paper/hyperparameters
 if [ -z "$1" ]; then
   echo "Please enter paper, e.g. ./run nature"
-  echo "Atari Choices: nature|doubleq|duel|prioritised|priorduel|persistent|bootstrap|recurrent|async-nstep|async-a3c"
+  echo "Atari Choices: nature|doubleq|duel|prioritised|priorduel|persistent|bootstrap|recurrent|tightening|async-nstep|async-a3c"
   echo "Catch Choices: demo|demo-async|demo-async-a3c"
   echo "Example Choices: demo-grid"
   exit 0
@@ -59,6 +59,9 @@ elif [ "$PAPER" == "bootstrap" ]; then
 elif [ "$PAPER" == "recurrent" ]; then
   # Recurrent (note that evaluation methodology is different)
   th main.lua -env rlenvs.Atari -modelBody models.Atari -game $GAME -cudnn true -height 84 -width 84 -colorSpace y -histLen 10 -duel false -bootstraps 0 -recurrent true -memSize 400000 -memSampleFreq 1 -epsilonEnd 0.1 -tau 10000 -doubleQ false -PALpha 0 -optimiser adadelta -eta 0.1 "$@"
+elif [ "$PAPER" == "tightening" ]; then
+  # Optimality Tightening
+  th main.lua -env rlenvs.Atari -modelBody models.Atari -game $GAME -cudnn true -height 84 -width 84 -colorSpace y -duel false -bootstraps 0 -epsilonEnd 0.1 -tau 10000 -doubleQ false -PALpha 0 -eta 0.00025 -gradClip 0 -rewardClip 0 -tdClip 0 -kSteps 4 -lambda 4 "$@"
 
 # Async modes
 elif [ "$PAPER" == "demo-async" ]; then
