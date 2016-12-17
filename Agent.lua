@@ -331,7 +331,7 @@ function Agent:observe(reward, rawObservation, terminal)
 end
 
 -- Learns from experience
-function Agent:learn(x, indices, ISWeights, isValidation)
+function Agent:learn(x, indices, kIndices, ISWeights, isValidation)
   -- Copy x to parameters θ if necessary
   if x ~= self.theta then
     self.theta:copy(x)
@@ -372,8 +372,13 @@ function Agent:learn(x, indices, ISWeights, isValidation)
     self.QPrimes[n]:mul(1 - terminals[n]) -- Zero Q(s' a) when s' is terminal
     Y[n] = self.QPrimes[n]:gather(2, APrimeMaxInds[n])
   end
-  -- Calculate target Y := r + γ.Q(s', argmax_a[Q(s', a; θ)]; θtarget)
-  Y:mul(self.gamma):add(rewards:repeatTensor(1, self.heads))
+  if self.kSteps > 0 then
+    -- Calculate target Y := R + γ.Q(s', argmax_a[Q(s', a; θ)]; θtarget)
+    Y:mul(self.gamma):add(discountedRewards:repeatTensor(1, self.heads))
+  else
+    -- Calculate target Y := r + γ.Q(s', argmax_a[Q(s', a; θ)]; θtarget)
+    Y:mul(self.gamma):add(rewards:repeatTensor(1, self.heads))
+  end
 
   -- Get all predicted Q-values from the current state
   if self.recurrent and self.doubleQ then
@@ -419,26 +424,17 @@ function Agent:learn(x, indices, ISWeights, isValidation)
   if self.kSteps > 0 then
     local Lmax = self.Tensor(N, self.heads)
     local Umin = self.Tensor(N, self.heads)
-    for n = 1, N do
-      local L = self.Tensor(self.kSteps, self.heads)
-      local U = self.Tensor(self.kSteps, self.heads)
-      local kIndices = torch.LongTensor(2 * self.kSteps) -- indices of k future and k past transitions
-      -- Starting from current transition, get k future and k past transitions
-      for kStep = 1, self.kSteps do
-        -- Get the k future transition (used for calculating L_k)
-        kIndices[kStep] = indices[n] + kStep
-        -- Get the k past transition (used for calculating U_k)
-        kIndices[kStep + self.kSteps] = indices[n] - kStep
-      end
-      local kTransitions = self.memory:retrieve(kIndices)
-      -- Forward all k transitions to get L_k and U_k for all heads
-      local allK = self.targetNet:forward(kTransitions)
-      L = allK[{{1, self.kSteps}, {}}]
-      U = allK[{{self.kSteps + 1, 2 * self.kSteps}, {}}]
+    local kTransitions = self.memory:retrieveK(kIndices)
+    -- Get L_k and U_k for k future and k past transitions for all heads in a single pass
+    local kQPrimes = self.targetNet:forward(kTransitions)
+    for n = 1, N * (2 * self.kSteps), 2 * self.kSteps do
+      local kAPrimeMax, kAPrimeMaxInds = torch.max(kQPrimes[{{n, n + 2 * self.kSteps - 1}, {}, {}}], 3) -- Qk(s, a)
+      local L = kAPrimeMax[{{1, self.kSteps}, {}, {}}] -- L_k
+      local U = kAPrimeMax[{{self.kSteps + 1, 2 * self.kSteps}, {}, {}}] -- U_k
       -- Get max lower bound for all heads
-      Lmax[n] = torch.max(L, 1)
+      Lmax[math.ceil(n / (2 * self.kSteps))] = torch.max(L, 1)
       -- Get min upper bound for all heads
-      Umin[n] = torch.min(U, 1)
+      Umin[math.ceil(n / (2 * self.kSteps))] = torch.min(U, 1)
     end
     -- Calculate TD-error: Lmax - Q(s, a)
     self.tdErrLower = Lmax - QTaken
@@ -452,21 +448,14 @@ function Agent:learn(x, indices, ISWeights, isValidation)
     -- Squared loss is used within clipping range, absolute loss is used outside (approximates Huber loss)
     local sqLoss = torch.cmin(torch.abs(self.tdErr), self.tdClip)
     local absLoss = torch.abs(self.tdErr) - sqLoss
-    if self.kSteps > 0 then
-      local a = sqLoss:pow(2):mul(0.5):add(absLoss:mul(self.tdClip))
-      local b = self.tdErrLower:clone():pow(2):cmax(0):mul(self.lamda):mul(0.5)
-      local c = self.tdErrUpper:clone():pow(2):cmax(0):mul(self.lambda):mul(0.5)
-      loss = torch.mean(a:add(b):add(c)) -- Average over heads
-    else
       loss = torch.mean(sqLoss:pow(2):mul(0.5):add(absLoss:mul(self.tdClip))) -- Average over heads
-    end
     -- Clip TD-errors δ
     self.tdErr:clamp(-self.tdClip, self.tdClip)
   else
     -- Squared loss
     if self.kSteps > 0 then
       local a = self.tdErr:clone():pow(2)
-      local b = self.tdErrLower:clone():pow(2):cmax(0):mul(self.lamda)
+      local b = self.tdErrLower:clone():pow(2):cmax(0):mul(self.lambda)
       local c = self.tdErrUpper:clone():pow(2):cmax(0):mul(self.lambda)
       loss = torch.mean(a:add(b):add(c):mul(0.5)) -- Average over heads
     else
@@ -508,10 +497,10 @@ function Agent:learn(x, indices, ISWeights, isValidation)
 end
 
 -- Optimises the network parameters θ
-function Agent:optimise(indices, ISWeights)
+function Agent:optimise(indices, kIndices, ISWeights)
   -- Create function to evaluate given parameters x
   local feval = function(x)
-    return self:learn(x, indices, ISWeights)
+    return self:learn(x, indices, kIndices, ISWeights)
   end
   
   -- Optimise
@@ -575,15 +564,16 @@ function Agent:validate()
   -- Loop over validation transitions
   local nBatches = math.ceil(self.valSize / self.batchSize)
   local ISWeights = self.Tensor(self.batchSize):fill(1)
-  local startIndex, endIndex, batchSize, indices
+  local startIndex, endIndex, batchSize, indices, kIndices
   for n = 1, nBatches do
     startIndex = (n - 1)*self.batchSize + 2
     endIndex = math.min(n*self.batchSize + 1, self.valSize + 1)
     batchSize = endIndex - startIndex + 1
     indices = torch.linspace(startIndex, endIndex, batchSize):long()
+    kIndices = nil
 
     -- Perform "learning" (without optimisation)
-    self:learn(self.theta, indices, ISWeights:narrow(1, 1, batchSize), true)
+    self:learn(self.theta, indices, kIndices, ISWeights:narrow(1, 1, batchSize), true)
 
     -- Calculate V(s') and TD-error δ
     if self.PALpha == 0 then
