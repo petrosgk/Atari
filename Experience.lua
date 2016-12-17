@@ -18,23 +18,30 @@ function Experience:_init(capacity, opt, isValidation)
   self.learnStart = opt.learnStart
   self.alpha = opt.alpha
   self.betaZero = opt.betaZero
+  self.kSteps = opt.kSteps
 
   -- Create transition tuples buffer
-  local bufferStateSize = torch.LongStorage(_.append({opt.batchSize, opt.histLen}, opt.stateSpec[2]))
+  local bufferStateSize = torch.LongStorage(_.append({ opt.batchSize, opt.histLen }, opt.stateSpec[2]))
+  -- Create k future and past transition tuples buffer
+  local bufferStateSizeK = torch.LongStorage(_.append({ opt.batchSize, 2 * opt.kSteps, opt.histLen }, opt.stateSpec[2]))
   self.transTuples = {
     states = opt.Tensor(bufferStateSize),
+    kStates = opt.Tensor(bufferStateSizeK),
     actions = torch.ByteTensor(opt.batchSize),
     rewards = opt.Tensor(opt.batchSize),
     discountedRewards = opt.Tensor(opt.batchSize),
     transitions = opt.Tensor(bufferStateSize),
+    kTransitions = opt.Tensor(bufferStateSizeK),
     terminals = torch.ByteTensor(opt.batchSize),
+    kTerminals = torch.ByteTensor(opt.batchSize, 2 * opt.kSteps),
     priorities = opt.Tensor(opt.batchSize)
   }
   self.indices = torch.LongTensor(opt.batchSize)
+  self.kIndices = torch.LongTensor(opt.batchSize, 2 * opt.kSteps)
   self.w = opt.Tensor(opt.batchSize):fill(1) -- Importance-sampling weights w, 1 if no correction needed
 
   -- Allocate memory for experience
-  local stateSize = torch.LongStorage(_.append({capacity}, opt.stateSpec[2])) -- Calculate state storage size
+  local stateSize = torch.LongStorage(_.append({ capacity }, opt.stateSpec[2])) -- Calculate state storage size
   self.imgDiscLevels = 255 -- Number of discretisation levels for images (used for float <-> byte conversion)
   if opt.discretiseMem then
     -- For the standard DQN problem, float vs. byte storage is 24GB vs. 6GB memory, so this prevents/minimises slow swap usage
@@ -63,7 +70,7 @@ function Experience:_init(capacity, opt, isValidation)
     self.distributions = {}
     local nPartitions = 100 -- learnStart must be at least 1/100 of capacity (arbitrary constant)
     local partitionNum = 1
-    local partitionDivision = math.floor(capacity/nPartitions)
+    local partitionDivision = math.floor(capacity / nPartitions)
 
     for n = partitionDivision, capacity, partitionDivision do
       if n >= opt.learnStart or n == capacity then -- Do not calculate distributions for before learnStart occurs
@@ -79,14 +86,14 @@ function Experience:_init(capacity, opt, isValidation)
         distribution.strataEnds[1] = 0 -- First index is 0 (+1)
         distribution.strataEnds[opt.batchSize + 1] = n -- Last index is n
         -- Use linear search to find strata indices
-        local stratumEnd = 1/opt.batchSize
+        local stratumEnd = 1 / opt.batchSize
         local index = 1
         for s = 2, opt.batchSize do
           while cdf[index] < stratumEnd do
             index = index + 1
           end
           distribution.strataEnds[s] = index -- Save index
-          stratumEnd = stratumEnd + 1/opt.batchSize -- Set condition for next stratum
+          stratumEnd = stratumEnd + 1 / opt.batchSize -- Set condition for next stratum
         end
 
         -- Check that enough transitions are available (to prevent an infinite loop of infinite tuples)
@@ -113,7 +120,7 @@ function Experience:_init(capacity, opt, isValidation)
   end
 
   -- Calculate β growth factor (linearly annealed till end of training)
-  self.betaGrad = (1 - opt.betaZero)/(opt.steps - opt.learnStart)
+  self.betaGrad = (1 - opt.betaZero) / (opt.steps - opt.learnStart)
 
   -- Get singleton instance for step
   self.globals = Singleton.getInstance()
@@ -219,11 +226,14 @@ function Experience:retrieve(indices)
     end
   end
 
-  return self.transTuples.states[{{1, N}}], self.transTuples.actions[{{1, N}}], self.transTuples.rewards[{{1, N}}], self.transTuples.discountedRewards[{{1, N}}], self.transTuples.transitions[{{1, N}}], self.transTuples.terminals[{{1, N}}]
+  return self.transTuples.states[{ { 1, N } }], self.transTuples.actions[{ { 1, N } }], self.transTuples.rewards[{ { 1, N } }], self.transTuples.discountedRewards[{ { 1, N } }], self.transTuples.transitions[{ { 1, N } }], self.transTuples.terminals[{ { 1, N } }]
 end
 
 -- Determines if an index points to a valid transition state
 function Experience:validateTransition(index)
+  if index <= 0 then
+    return false
+  end
   -- Calculate beginning of state and end of transition for checking overlap with head of buffer
   local minIndex, maxIndex = index - self.histLen, self:circIndex(index + 1)
   -- State must not be terminal, invalid, or overlap with head of buffer
@@ -246,6 +256,32 @@ function Experience:sample()
       while not isValid do
         index = torch.random(1, N)
         isValid = self:validateTransition(index)
+
+        -- TODO: Make optimality tightening work with priority sampling too
+        -- If using optimality tightening, transition must also have k future and past valid transitions
+        if self.kSteps > 0 then
+          local validKTransitions = 0
+          local kIndex
+          for kStep = 1, self.kSteps do
+            -- Check if k future transition is valid
+            kIndex = index + kStep
+            if self:validateTransition(kIndex) then
+              validKTransitions = validKTransitions + 1
+              -- Store k-index
+              self.kIndices[n][kStep] = kIndex
+            end
+            -- Check if k past transition is valid
+            kIndex = index - kStep
+            if self:validateTransition(kIndex) then
+              validKTransitions = validKTransitions + 1
+              -- Store k-index
+              self.kIndices[n][kStep + self.kSteps] = kIndex
+            end
+          end
+          if validKTransitions < 2 * self.kSteps then
+            isValid = false
+          end
+        end
       end
 
       -- Store index
@@ -269,7 +305,7 @@ function Experience:sample()
       -- Generate random index until valid transition found
       while not isValid do
         -- Sample within stratum
-        rankIndices[n] = torch.random(distribution.strataEnds[n] + 1, distribution.strataEnds[n+1])
+        rankIndices[n] = torch.random(distribution.strataEnds[n] + 1, distribution.strataEnds[n + 1])
         -- Retrieve actual transition index
         index = self.priorityQueue:getValueByVal(rankIndices[n])
         isValid = self:validateTransition(index) -- The last stratum might be full of terminal states, leading to many checks
@@ -280,7 +316,7 @@ function Experience:sample()
     end
 
     -- Compute importance-sampling weights w = (N * p(rank))^-β
-    local beta = math.min(self.betaZero + (self.globals.step - self.learnStart - 1)*self.betaGrad, 1)
+    local beta = math.min(self.betaZero + (self.globals.step - self.learnStart - 1) * self.betaGrad, 1)
     self.w = distribution.pdf:index(1, rankIndices):mul(N):pow(-beta) -- torch.index does memory copy
     -- Calculate max importance-sampling weight
     -- Note from Tom Schaul: Calculated over minibatch, not entire distribution
@@ -291,10 +327,9 @@ function Experience:sample()
   elseif self.memPriority == 'proportional' then
 
     -- TODO: Proportional prioritised experience replay
-
   end
 
-  return self.indices, self.w
+  return self.indices, self.kIndices, self.w
 end
 
 -- Update experience priorities using TD-errors δ
@@ -306,7 +341,7 @@ function Experience:updatePriorities(indices, delta)
     end
 
     for p = 1, indices:size(1) do
-      self.priorityQueue:updateByVal(indices[p], priorities[p], indices[p]) 
+      self.priorityQueue:updateByVal(indices[p], priorities[p], indices[p])
     end
   end
 end
@@ -320,6 +355,49 @@ end
 function Experience:updateTuple(indice, discountedReward)
   local memIndex = indice
   self.discountedRewards[memIndex] = discountedReward
+end
+
+function Experience:retrieveK(kIndices)
+  local N = kIndices:size(1)
+  local Nk = kIndices:size(2)
+  self.transTuples.kTransitions:zero()
+
+  for n = 1, N do
+    -- Iterate over kIndices
+    for kSteps = 1, Nk do
+      local kMemIndex = kIndices[n][kSteps]
+      local histIndex = self.histLen
+      -- Retrieve terminal status (of transition)
+      self.transTuples.kTerminals[n][kSteps] = self.terminals[self:circIndex(kMemIndex + 1)]
+      repeat
+        if self.discretiseMem then
+          -- Copy k state (converting to float first for non-integer division)
+          self.transTuples.kStates[n][kSteps][histIndex]:div(self.states[kMemIndex]:typeAs(self.transTuples.kStates), self.imgDiscLevels) -- byte -> float
+        else
+          self.transTuples.kStates[n][kSteps][histIndex] = self.states[kMemIndex]:typeAs(self.transTuples.kStates)
+        end
+        -- Adjust kIndices
+        kMemIndex = self:circIndex(kMemIndex - 1)
+        histIndex = histIndex - 1
+      until histIndex == 0 or self.terminals[kMemIndex] == 1 or self.invalid[kMemIndex] == 1
+      -- If k transition not terminal, fill in transition history (invalid states should not be selected in the first place)
+      if self.transTuples.kTerminals[n][kSteps] == 0 then
+        -- Copy most recent state
+        for h = 2, self.histLen do
+          self.transTuples.kTransitions[n][kSteps][h - 1] = self.transTuples.kStates[n][kSteps][h]
+        end
+        -- Get transition frame
+        local kMemTIndex = self:circIndex(kIndices[n][kSteps] + 1)
+        if self.discretiseMem then
+          self.transTuples.kTransitions[n][kSteps][self.histLen]:div(self.states[kMemTIndex]:typeAs(self.transTuples.kTransitions), self.imgDiscLevels) -- byte -> float
+        else
+          self.transTuples.kTransitions[n][kSteps][self.histLen] = self.states[kMemTIndex]:typeAs(self.transTuples.kTransitions)
+        end
+      end
+    end
+  end
+
+  return self.transTuples.kTransitions[{ { 1, N } }]
 end
 
 return Experience
