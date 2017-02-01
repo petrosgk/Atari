@@ -24,5 +24,6 @@ To run with Minecraft environment (requires Project Malmo):
 5) `./run_minecraft.sh`
 
 If you have [rlenvs](https://github.com/Kaixhin/rlenvs) installed you can use the Minecraft
-environment I have included there by replacing `-env Minecraft` with `-env rlenvs.Minecraft`.
+environment I have included there by replacing `-env Minecraft` with 
+`-env rlenvs.Minecraft`. 
 Make sure to follow the instrunctions there for installing Minecraft dependencies.
