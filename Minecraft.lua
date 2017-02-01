@@ -92,7 +92,7 @@ function Minecraft:_init(opts)
 </Mission>
 ]]
 
-  self.actions = opts.actions or {"turn 0.3", "turn -0.3"}
+  self.actions = opts.actions or {"turn 0.5", "turn -0.5"}
 
   self.agent_host = AgentHost()
 
@@ -203,7 +203,7 @@ function Minecraft:start()
   
   self.rewards = self:getRewards(world_state.rewards)
   
-  self.agent_host:sendCommand("move 0.3") -- start moving
+  self.agent_host:sendCommand("move 0.5") -- start moving
   
   sleep(0.05)
 
