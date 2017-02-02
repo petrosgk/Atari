@@ -1,4 +1,14 @@
-# Atari + Minecraft ![Space Invader](http://www.rw-designer.com/cursor-view/74522.png)
+# Minecraft DQN
+
+<a href="http://www.youtube.com/watch?feature=player_embedded&v=F156fBDjr9A
+" target="_blank"><img src="http://img.youtube.com/vi/F156fBDjr9A/0.jpg" 
+alt="Testing Deep Learning on Minecraft" width="240" height="180" border="10" /></a>
+<a href="http://www.youtube.com/watch?feature=player_embedded&v=l9rxBxqBzqc
+" target="_blank"><img src="http://img.youtube.com/vi/l9rxBxqBzqc/0.jpg" 
+alt="Testing Deep Learning on Minecraft" width="240" height="180" border="10" /></a>
+<a href="http://www.youtube.com/watch?feature=player_embedded&v=fib--8Tl8qI
+" target="_blank"><img src="http://img.youtube.com/vi/fib--8Tl8qI/0.jpg" 
+alt="Testing Deep Learning on Minecraft" width="240" height="180" border="10" /></a>
 
 To run with Minecraft environment (requires Project Malmo):
 
